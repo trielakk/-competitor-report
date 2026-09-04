@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------
-# 内置中国全部地级市/直辖市到省份的映射字典（满足需求4）
+# 内置中国全部地级市/直辖市到省份的映射字典
 # ---------------------------------------------------------
 PROVINCE_MAPPING = {
     # 直辖市
@@ -220,9 +220,7 @@ def get_standard_province(city_name):
         return ""
     cleaned = city_name.strip()
     key = cleaned.replace("市", "").replace("省", "").replace("自治区", "")
-    if key in PROVINCE_MAPPING:
-        return PROVINCE_MAPPING[key]
-    return ""
+    return PROVINCE_MAPPING.get(key, "")
 
 def format_city_name(city_name):
     if not isinstance(city_name, str):
@@ -230,11 +228,10 @@ def format_city_name(city_name):
     cleaned = city_name.strip().replace("省", "").replace("市", "")
     if cleaned in ["北京", "上海", "天津", "重庆"]:
         return cleaned + "市"
-    else:
-        return cleaned
+    return cleaned
 
 # ---------------------------------------------------------
-# 日期格式化函数（统一转为 yyyy.mm.dd-yyyy.mm.dd，满足需求2）
+# 日期格式化函数
 # ---------------------------------------------------------
 def standardize_date(date_str):
     if not isinstance(date_str, str):
@@ -242,7 +239,7 @@ def standardize_date(date_str):
             try:
                 dt = pd.to_datetime(date_str)
                 return dt.strftime("%Y.%m.%d")
-            except:
+            except Exception:
                 return str(date_str)
         return ""
     
@@ -271,10 +268,7 @@ st.markdown("通过本系统上传3家公司原始报表、2个匹配表及汇�
 
 st.sidebar.header("📁 文件上传区域")
 
-# 上传底表（汇总表）
 base_file = st.sidebar.file_uploader("1. 上传汇总表（底表格式）", type=["xlsx", "xls"])
-
-# 上传匹配表
 product_match_file = st.sidebar.file_uploader("2. 上传 Product匹配表", type=["xlsx", "xls"])
 media_match_file = st.sidebar.file_uploader("3. 上传 媒体匹配表", type=["xlsx", "xls"])
 
@@ -289,31 +283,28 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
         st.error("请先上传汇总表（底表）！")
     else:
         try:
-            # 读取底表结构
             base_df = pd.read_excel(base_file)
             st.success("成功加载汇总底表模板！")
             
-            # 读取匹配表
             df_prod_match = pd.read_excel(product_match_file) if product_match_file else pd.DataFrame()
             df_media_match = pd.read_excel(media_match_file) if media_match_file else pd.DataFrame()
             
             all_processed_dfs = []
             
             # ---------------------------------------------------------
-            # 处理分众公司（具备单元格城市分拆与费用均摊，满足需求3）
+            # 处理分众公司
             # ---------------------------------------------------------
             if fenzhong_file:
                 df_fz = pd.read_excel(fenzhong_file)
                 processed_fz_rows = []
                 for _, row in df_fz.iterrows():
                     cities_raw = str(row.get("投放城市", row.get("城市", "")))
-                    # 按照逗号、空格等分隔符拆分城市
                     cities = [c.strip() for c in re.split(r'[,，、\s]+', cities_raw) if c.strip()]
                     
                     cost_raw = row.get("投放金额", row.get("金额", 0))
                     try:
                         cost = float(cost_raw)
-                    except:
+                    except Exception:
                         cost = 0.0
                         
                     split_count = len(cities) if cities else 1
@@ -331,7 +322,7 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
                         
                     for city in cities:
                         formatted_city = format_city_name(city)
-                        province = get_standard_province(city) # 自动补充省份（满足需求4）
+                        province = get_standard_province(city)
                         
                         new_row = row.copy()
                         new_row["来源公司"] = "分众公司"
@@ -395,11 +386,11 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
                 combined_df = pd.concat(all_processed_dfs, ignore_index=True)
                 
                 # ---------------------------------------------------------
-                # 校验与备注匹配 ("匹配不到产品名称"等，满足需求1 & 5)
+                # 校验与备注匹配
                 # ---------------------------------------------------------
-                valid_brands = set(df_prod_match["投放品牌"].astype(str)) if not df_prod_match.empty and "投放品牌" in df_prod_match.columns else set()
-                valid_prods = set(df_prod_match["投放产品"].astype(str)) if not df_prod_match.empty and "投放产品" in df_prod_match.columns else set()
-                valid_medias = set(df_media_match["媒体类型"].astype(str)) if not df_media_match.empty and "媒体类型" in df_media_match.columns else set()
+                valid_brands = set(df_prod_match["投放品牌"].dropna().astype(str)) if not df_prod_match.empty and "投放品牌" in df_prod_match.columns else set()
+                valid_prods = set(df_prod_match["投放产品"].dropna().astype(str)) if not df_prod_match.empty and "投放产品" in df_prod_match.columns else set()
+                valid_medias = set(df_media_match["媒体类型"].dropna().astype(str)) if not df_media_match.empty and "媒体类型" in df_media_match.columns else set()
                 
                 remarks = []
                 for _, row in combined_df.iterrows():
