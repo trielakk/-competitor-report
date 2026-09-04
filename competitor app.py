@@ -231,7 +231,7 @@ def format_city_name(city_name):
     return cleaned
 
 # ---------------------------------------------------------
-# 日期格式化函数
+# 日期与数值清洗增强函数
 # ---------------------------------------------------------
 def standardize_date(date_str):
     if not isinstance(date_str, str):
@@ -266,6 +266,18 @@ def parse_single_date(d_str):
         return f"{y}.{int(m):02d}.{int(d):02d}"
     return d_str.strip()
 
+def parse_cost(val):
+    if pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip()
+    s_clean = re.sub(r'[^\d.-]', '', s)
+    try:
+        return float(s_clean) if s_clean else 0.0
+    except ValueError:
+        return 0.0
+
 # ---------------------------------------------------------
 # Streamlit 主界面
 # ---------------------------------------------------------
@@ -292,7 +304,6 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
             base_df = pd.read_excel(base_file)
             st.success("成功加载汇总底表模板！")
             
-            # 自动检测底表中的费用列名称（匹配“投放总费用（¥）”或包含“金额”、“费用”的列）
             cost_col_name = "投放金额"
             for col in base_df.columns:
                 if "总费用" in col or "金额" in col or "费用" in col:
@@ -305,7 +316,7 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
             all_processed_dfs = []
             
             # ---------------------------------------------------------
-            # 处理分众公司（具备开始结束日期合并、费用均摊至底表总费用列）
+            # 处理分众公司
             # ---------------------------------------------------------
             if fenzhong_file:
                 df_fz = pd.read_excel(fenzhong_file)
@@ -314,16 +325,12 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
                     cities_raw = str(row.get("投放城市", row.get("城市", "")))
                     cities = [c.strip() for c in re.split(r'[,，、\s]+', cities_raw) if c.strip()]
                     
-                    cost_raw = row.get("投放金额", row.get("金额", row.get("投放总费用（¥）", 0)))
-                    try:
-                        cost = float(cost_raw)
-                    except Exception:
-                        cost = 0.0
+                    cost_raw = row.get("投放金额", row.get("金额", row.get("投放总费用（¥）", row.get("费用", 0))))
+                    cost = parse_cost(cost_raw)
                         
                     split_count = len(cities) if cities else 1
                     split_cost = cost / split_count if split_count > 0 else cost
                     
-                    # 需求1：将分众公司的“投放开始”和“投放结束”合并为 "yyyy.mm.dd-yyyy.mm.dd" 格式
                     start_raw = row.get("投放开始", row.get("开始日期", ""))
                     end_raw = row.get("投放结束", row.get("结束日期", ""))
                     d1 = parse_single_date(start_raw)
@@ -352,7 +359,7 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
                         new_row["媒体类型"] = media
                         new_row["投放城市"] = formatted_city
                         new_row["省份"] = province
-                        new_row[cost_col_name] = split_cost  # 投放金额/总费用赋值
+                        new_row[cost_col_name] = split_cost  
                         new_row["投放日期"] = std_date
                         processed_fz_rows.append(new_row)
                         
@@ -372,11 +379,16 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
                     date_raw = str(row.get("投放日期", row.get("日期", "")))
                     std_date = standardize_date(date_raw)
                     
+                    cost_raw = row.get("投放金额", row.get("金额", row.get("费用", 0)))
+                    cost_val = parse_cost(cost_raw)
+
                     new_row = row.copy()
                     new_row["来源公司"] = "白马公司"
                     new_row["投放城市"] = formatted_city
                     new_row["省份"] = province
                     new_row["投放日期"] = std_date
+                    if cost_col_name in new_row or len(df_bm.columns) > 0:
+                        new_row[cost_col_name] = cost_val
                     processed_bm_rows.append(new_row)
                 if processed_bm_rows:
                     all_processed_dfs.append(pd.DataFrame(processed_bm_rows))
@@ -394,11 +406,16 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
                     date_raw = str(row.get("投放日期", row.get("日期", "")))
                     std_date = standardize_date(date_raw)
                     
+                    cost_raw = row.get("投放金额", row.get("金额", row.get("费用", 0)))
+                    cost_val = parse_cost(cost_raw)
+
                     new_row = row.copy()
                     new_row["来源公司"] = "SR公司"
                     new_row["投放城市"] = formatted_city
                     new_row["省份"] = province
                     new_row["投放日期"] = std_date
+                    if cost_col_name in new_row or len(df_sr.columns) > 0:
+                        new_row[cost_col_name] = cost_val
                     processed_sr_rows.append(new_row)
                 if processed_sr_rows:
                     all_processed_dfs.append(pd.DataFrame(processed_sr_rows))
@@ -431,7 +448,7 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
                 
                 combined_df["备注"] = remarks
                 
-                # 严格对齐底表列结构（需求2：全部表格的输出都要按上传的汇总表底表格式输出）
+                # 严格对齐底表列结构
                 final_columns = list(base_df.columns)
                 for col in final_columns:
                     if col not in combined_df.columns:
@@ -441,6 +458,12 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
                 
                 st.subheader("🎉 转换与汇总预览结果")
                 st.dataframe(final_output_df.head(20))
+                
+                # 显示汇总统计指标
+                total_records = len(final_output_df)
+                total_cost_val = final_output_df[cost_col_name].sum() if cost_col_name in final_output_df.columns else 0.0
+                st.metric(label="汇总总行数", value=f"{total_records} 行")
+                st.metric(label=f"汇总总费用 ({cost_col_name})", value=f"¥ {total_cost_val:,.2f}")
                 
                 # 导出下载
                 output = io.BytesIO()
