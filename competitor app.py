@@ -253,12 +253,18 @@ def standardize_date(date_str):
     return s
 
 def parse_single_date(d_str):
+    if not isinstance(d_str, str):
+        try:
+            dt = pd.to_datetime(d_str)
+            return dt.strftime("%Y.%m.%d")
+        except Exception:
+            return ""
     d_str = d_str.replace("/", ".").replace("-", ".")
     match = re.search(r'(\d{4})[./年](\d{1,2})[./月](\d{1,2})', d_str)
     if match:
         y, m, d = match.groups()
         return f"{y}.{int(m):02d}.{int(d):02d}"
-    return d_str
+    return d_str.strip()
 
 # ---------------------------------------------------------
 # Streamlit 主界面
@@ -286,13 +292,20 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
             base_df = pd.read_excel(base_file)
             st.success("成功加载汇总底表模板！")
             
+            # 自动检测底表中的费用列名称（匹配“投放总费用（¥）”或包含“金额”、“费用”的列）
+            cost_col_name = "投放金额"
+            for col in base_df.columns:
+                if "总费用" in col or "金额" in col or "费用" in col:
+                    cost_col_name = col
+                    break
+            
             df_prod_match = pd.read_excel(product_match_file) if product_match_file else pd.DataFrame()
             df_media_match = pd.read_excel(media_match_file) if media_match_file else pd.DataFrame()
             
             all_processed_dfs = []
             
             # ---------------------------------------------------------
-            # 处理分众公司
+            # 处理分众公司（具备开始结束日期合并、费用均摊至底表总费用列）
             # ---------------------------------------------------------
             if fenzhong_file:
                 df_fz = pd.read_excel(fenzhong_file)
@@ -301,7 +314,7 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
                     cities_raw = str(row.get("投放城市", row.get("城市", "")))
                     cities = [c.strip() for c in re.split(r'[,，、\s]+', cities_raw) if c.strip()]
                     
-                    cost_raw = row.get("投放金额", row.get("金额", 0))
+                    cost_raw = row.get("投放金额", row.get("金额", row.get("投放总费用（¥）", 0)))
                     try:
                         cost = float(cost_raw)
                     except Exception:
@@ -310,8 +323,16 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
                     split_count = len(cities) if cities else 1
                     split_cost = cost / split_count if split_count > 0 else cost
                     
-                    date_raw = str(row.get("投放日期", row.get("日期", "")))
-                    std_date = standardize_date(date_raw)
+                    # 需求1：将分众公司的“投放开始”和“投放结束”合并为 "yyyy.mm.dd-yyyy.mm.dd" 格式
+                    start_raw = row.get("投放开始", row.get("开始日期", ""))
+                    end_raw = row.get("投放结束", row.get("结束日期", ""))
+                    d1 = parse_single_date(start_raw)
+                    d2 = parse_single_date(end_raw)
+                    if d1 and d2:
+                        std_date = f"{d1}-{d2}"
+                    else:
+                        date_raw = str(row.get("投放日期", row.get("日期", "")))
+                        std_date = standardize_date(date_raw)
                     
                     brand = row.get("投放品牌", row.get("品牌", ""))
                     prod = row.get("投放产品", row.get("产品", ""))
@@ -331,7 +352,7 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
                         new_row["媒体类型"] = media
                         new_row["投放城市"] = formatted_city
                         new_row["省份"] = province
-                        new_row["投放金额"] = split_cost
+                        new_row[cost_col_name] = split_cost  # 投放金额/总费用赋值
                         new_row["投放日期"] = std_date
                         processed_fz_rows.append(new_row)
                         
@@ -410,7 +431,7 @@ if st.sidebar.button("🚀 开始数据转换与汇总", type="primary"):
                 
                 combined_df["备注"] = remarks
                 
-                # 对齐底表列结构
+                # 严格对齐底表列结构（需求2：全部表格的输出都要按上传的汇总表底表格式输出）
                 final_columns = list(base_df.columns)
                 for col in final_columns:
                     if col not in combined_df.columns:
