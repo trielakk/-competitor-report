@@ -1,8 +1,24 @@
 import os
 import pandas as pd
 import re
+import io
+import streamlit as st
 
-# 1. 内置城市与省份对照表（涵盖中国主要城市，可根据需要继续扩充）
+# -----------------------------------------------------------------------------
+# 1. Streamlit 页面初始化与配置
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="竞品数据处理与汇总工具",
+    page_icon="📊",
+    layout="wide"
+)
+
+st.title("📊 竞品数据自动清洗与汇总工具")
+st.markdown("上传分众、白马、SR 或其他竞品公司的 Excel 导出文件，系统将自动清洗字段、补全省份并导出统一的标准竞品表。")
+
+# -----------------------------------------------------------------------------
+# 2. 内置城市与省份对照表
+# -----------------------------------------------------------------------------
 CITY_TO_PROVINCE = {
     # 直辖市
     "北京": "北京", "北京市": "北京",
@@ -108,6 +124,9 @@ CITY_TO_PROVINCE = {
     "三亚": "海南省", "三亚市": "海南省",
 }
 
+# -----------------------------------------------------------------------------
+# 3. 数据清洗辅助函数
+# -----------------------------------------------------------------------------
 def get_province_by_city(city_name):
     """根据城市名智能补全省份"""
     if not city_name or pd.isna(city_name):
@@ -131,155 +150,183 @@ def find_header_row(df_raw):
             return idx
     return 0
 
-def load_sheet_smart(file_path, sheet_name):
+def load_sheet_smart(file_obj, sheet_name):
     """智能读取Sheet，支持自动定位表头与清除空行"""
-    df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+    df_raw = pd.read_excel(file_obj, sheet_name=sheet_name, header=None)
     if df_raw.empty:
         return pd.DataFrame()
         
     header_idx = find_header_row(df_raw)
-    df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_idx)
+    df = pd.read_excel(file_obj, sheet_name=sheet_name, header=header_idx)
     df.columns = [str(c).strip() for c in df.columns]
     df = df.dropna(how="all")
     return df
 
-def process_focus_media(file_path):
-    """1. 处理分众公司表格（保留原有全量逻辑）"""
+def clean_dataframe_for_display(df):
+    """
+    核心修复：将 DataFrame 中所有混合数据类型转换为统一字符串
+    彻底解决 PyArrow ArrowTypeError 导致 Streamlit 渲染崩溃的问题
+    """
+    df_clean = df.copy()
+    for col in df_clean.columns:
+        df_clean[col] = df_clean[col].fillna("").astype(str)
+        df_clean[col] = df_clean[col].replace(["nan", "None", "<NA>"], "")
+    return df_clean
+
+# -----------------------------------------------------------------------------
+# 4. 各媒体公司特定字段解析逻辑
+# -----------------------------------------------------------------------------
+def parse_focus_media(file_obj):
     records = []
-    try:
-        excel = pd.ExcelFile(file_path)
-        for sheet in excel.sheet_names:
-            df = load_sheet_smart(file_path, sheet)
-            if df.empty:
-                continue
+    excel = pd.ExcelFile(file_obj)
+    for sheet in excel.sheet_names:
+        df = load_sheet_smart(file_obj, sheet)
+        if df.empty:
+            continue
+        
+        for _, row in df.iterrows():
+            city = row.get("城市", "")
+            province = row.get("省份", "") or get_province_by_city(city)
             
-            for _, row in df.iterrows():
-                city = row.get("城市", "")
-                province = row.get("省份", "") or get_province_by_city(city)
-                
-                record = {
-                    "省份": province,
-                    "城市": city,
-                    "媒体公司": "分众公司",
-                    "媒体形式/名称": row.get("媒体名称", row.get("媒体类型", row.get("形式", ""))),
-                    "线路/站点/区域": row.get("线路", row.get("区域", row.get("位置", ""))),
-                    "套装/刊位编号": row.get("编号", row.get("刊位", "")),
-                    "客户/品牌": row.get("品牌", row.get("客户名称", row.get("客户", ""))),
-                    "行业": row.get("行业", ""),
-                    "上刊时间": row.get("上刊时间", row.get("开始时间", "")),
-                    "下刊时间": row.get("下刊时间", row.get("结束时间", "")),
-                    "面数/数量": row.get("数量", row.get("面数", 1)),
-                    "备注": row.get("备注", "")
-                }
-                records.append(record)
-    except Exception as e:
-        print(f"处理分众公司表格出错: {e}")
+            records.append({
+                "省份": province,
+                "城市": city,
+                "媒体公司": "分众公司",
+                "媒体形式/名称": row.get("媒体名称", row.get("媒体类型", row.get("形式", ""))),
+                "线路/站点/区域": row.get("线路", row.get("区域", row.get("位置", ""))),
+                "套装/刊位编号": row.get("编号", row.get("刊位", "")),
+                "客户/品牌": row.get("品牌", row.get("客户名称", row.get("客户", ""))),
+                "行业": row.get("行业", ""),
+                "上刊时间": row.get("上刊时间", row.get("开始时间", "")),
+                "下刊时间": row.get("下刊时间", row.get("结束时间", "")),
+                "面数/数量": row.get("数量", row.get("面数", 1)),
+                "备注": row.get("备注", "")
+            })
     return records
 
-def process_baima(file_path):
-    """2. 针对白马公司表格的特定解析机制"""
+def parse_baima(file_obj):
     records = []
-    try:
-        excel = pd.ExcelFile(file_path)
-        for sheet in excel.sheet_names:
-            df = load_sheet_smart(file_path, sheet)
-            if df.empty:
-                continue
+    excel = pd.ExcelFile(file_obj)
+    for sheet in excel.sheet_names:
+        df = load_sheet_smart(file_obj, sheet)
+        if df.empty:
+            continue
+        
+        for _, row in df.iterrows():
+            city = row.get("城市", row.get("City", ""))
+            province = row.get("省份", "") or get_province_by_city(city)
             
-            # 白马常用字段容错映射
-            for _, row in df.iterrows():
-                city = row.get("城市", row.get("City", ""))
-                province = row.get("省份", "") or get_province_by_city(city)
-                
-                record = {
-                    "省份": province,
-                    "城市": city,
-                    "媒体公司": "白马公司",
-                    "媒体形式/名称": row.get("站牌名称", row.get("媒体名称", row.get("媒体类型", "候车亭广告"))),
-                    "线路/站点/区域": row.get("线路", row.get("站点名称", row.get("站点", row.get("位置", "")))),
-                    "套装/刊位编号": row.get("站牌编号", row.get("编号", row.get("套装", ""))),
-                    "客户/品牌": row.get("客户品牌", row.get("客户名称", row.get("品牌", row.get("客户", "")))),
-                    "行业": row.get("行业分类", row.get("行业", "")),
-                    "上刊时间": row.get("上刊日期", row.get("上刊时间", row.get("开始日期", ""))),
-                    "下刊时间": row.get("下刊日期", row.get("下刊时间", row.get("结束日期", ""))),
-                    "面数/数量": row.get("面数", row.get("数量", row.get("发布看板数", 1))),
-                    "备注": row.get("备注", "")
-                }
-                records.append(record)
-    except Exception as e:
-        print(f"处理白马公司表格出错: {e}")
+            records.append({
+                "省份": province,
+                "城市": city,
+                "媒体公司": "白马公司",
+                "媒体形式/名称": row.get("站牌名称", row.get("媒体名称", row.get("媒体类型", "候车亭广告"))),
+                "线路/站点/区域": row.get("线路", row.get("站点名称", row.get("站点", row.get("位置", "")))),
+                "套装/刊位编号": row.get("站牌编号", row.get("编号", row.get("套装", ""))),
+                "客户/品牌": row.get("客户品牌", row.get("客户名称", row.get("品牌", row.get("客户", "")))),
+                "行业": row.get("行业分类", row.get("行业", "")),
+                "上刊时间": row.get("上刊日期", row.get("上刊时间", row.get("开始日期", ""))),
+                "下刊时间": row.get("下刊日期", row.get("下刊时间", row.get("结束日期", ""))),
+                "面数/数量": row.get("面数", row.get("数量", row.get("发布看板数", 1))),
+                "备注": row.get("备注", "")
+            })
     return records
 
-def process_sr(file_path):
-    """3. 针对 SR 公司表格的特定解析机制"""
+def parse_sr(file_obj):
     records = []
-    try:
-        excel = pd.ExcelFile(file_path)
-        for sheet in excel.sheet_names:
-            df = load_sheet_smart(file_path, sheet)
-            if df.empty:
-                continue
+    excel = pd.ExcelFile(file_obj)
+    for sheet in excel.sheet_names:
+        df = load_sheet_smart(file_obj, sheet)
+        if df.empty:
+            continue
+        
+        for _, row in df.iterrows():
+            city = row.get("城市", row.get("City", ""))
+            province = row.get("省份", "") or get_province_by_city(city)
             
-            for _, row in df.iterrows():
-                city = row.get("城市", row.get("City", ""))
-                province = row.get("省份", "") or get_province_by_city(city)
-                
-                record = {
-                    "省份": province,
-                    "城市": city,
-                    "媒体公司": "SR公司",
-                    "媒体形式/名称": row.get("媒体名称", row.get("媒体形式", row.get("看板类型", "SR媒体"))),
-                    "线路/站点/区域": row.get("线路/站点", row.get("位置", row.get("站点", row.get("区域", "")))),
-                    "套装/刊位编号": row.get("位号", row.get("刊位号", row.get("点位编号", row.get("编号", "")))),
-                    "客户/品牌": row.get("品牌", row.get("客户名称", row.get("广告主", row.get("客户", "")))),
-                    "行业": row.get("行业", row.get("品类", "")),
-                    "上刊时间": row.get("上刊时间", row.get("发布时间", row.get("开始时间", ""))),
-                    "下刊时间": row.get("下刊时间", row.get("撤刊时间", row.get("结束时间", ""))),
-                    "面数/数量": row.get("数量", row.get("频次", row.get("面数", 1))),
-                    "备注": row.get("备注", "")
-                }
-                records.append(record)
-    except Exception as e:
-        print(f"处理SR公司表格出错: {e}")
+            records.append({
+                "省份": province,
+                "城市": city,
+                "媒体公司": "SR公司",
+                "媒体形式/名称": row.get("媒体名称", row.get("媒体形式", row.get("看板类型", "SR媒体"))),
+                "线路/站点/区域": row.get("线路/站点", row.get("位置", row.get("站点", row.get("区域", "")))),
+                "套装/刊位编号": row.get("位号", row.get("刊位号", row.get("点位编号", row.get("编号", "")))),
+                "客户/品牌": row.get("品牌", row.get("客户名称", row.get("广告主", row.get("客户", "")))),
+                "行业": row.get("行业", row.get("品类", "")),
+                "上刊时间": row.get("上刊时间", row.get("发布时间", row.get("开始时间", ""))),
+                "下刊时间": row.get("下刊时间", row.get("撤刊时间", row.get("结束时间", ""))),
+                "面数/数量": row.get("数量", row.get("频次", row.get("面数", 1))),
+                "备注": row.get("备注", "")
+            })
     return records
 
-def main():
-    # 待处理的文件路径列表
-    files = {
-        "分众": "分众.xlsx",
-        "白马": "白马公司.xlsx",
-        "SR": "SR公司.xlsx"
-    }
-    
-    target_file = "1、最终要填写的竞品表.xlsx"
-    all_data = []
+# -----------------------------------------------------------------------------
+# 5. Web 主界面交互逻辑
+# -----------------------------------------------------------------------------
+uploaded_files = st.file_uploader(
+    "📎 请选择或拖入要处理的 Excel 文件（支持同时选择多个文件）", 
+    type=["xlsx", "xls"], 
+    accept_multiple_files=True
+)
 
-    for key, path in files.items():
-        if os.path.exists(path):
-            print(f"正在读取并处理: {path}")
-            if key == "分众":
-                all_data.extend(process_focus_media(path))
-            elif key == "白马":
-                all_data.extend(process_baima(path))
-            elif key == "SR":
-                all_data.extend(process_sr(path))
+if uploaded_files:
+    if st.button("🚀 开始解析并汇总", type="primary"):
+        all_records = []
+        
+        with st.spinner("数据处理中，正在读取 Sheet 并自动映射列字段..."):
+            for uploaded_file in uploaded_files:
+                filename = uploaded_file.name.lower()
+                
+                try:
+                    # 根据文件名自动选择匹配模版解析，无匹配则采用通用方式解析
+                    if "分众" in filename:
+                        records = parse_focus_media(uploaded_file)
+                    elif "白马" in filename:
+                        records = parse_baima(uploaded_file)
+                    elif "sr" in filename:
+                        records = parse_sr(uploaded_file)
+                    else:
+                        # 尝试通用解析逻辑
+                        records = parse_sr(uploaded_file)
+                    
+                    all_records.extend(records)
+                    st.toast(f"✅ 文件 '{uploaded_file.name}' 解析完成", icon="🎉")
+                    
+                except Exception as e:
+                    st.error(f"❌ 读取文件 '{uploaded_file.name}' 时发生错误: {e}")
+
+        if all_records:
+            # 1. 组合结果
+            res_df = pd.DataFrame(all_records)
+            
+            # 2. 补全省份信息
+            res_df["省份"] = res_df.apply(
+                lambda r: r["省份"] if str(r["省份"]).strip() else get_province_by_city(r["城市"]), 
+                axis=1
+            )
+            
+            # 3. 彻底清洗数据类型，解决 PyArrow 异常导致的展示卡死
+            res_df_clean = clean_dataframe_for_display(res_df)
+            
+            st.success(f"🎉 成功完成数据汇总！共提取 {len(res_df_clean)} 条记录。")
+            
+            # 4. 展示预览数据（适应最新的 Streamlit 规范，使用 width='stretch'）
+            st.subheader("📋 汇总结果预览（前 100 条）")
+            st.dataframe(res_df_clean.head(100), width='stretch')
+            
+            # 5. 生成 Excel 内存流用于前端下载
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                res_df_clean.to_excel(writer, index=False, sheet_name='竞品表汇总')
+            excel_data = excel_buffer.getvalue()
+            
+            st.download_button(
+                label="📥 点击下载【最终竞品汇总表.xlsx】",
+                data=excel_data,
+                file_name="1、最终要填写的竞品表.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
         else:
-            print(f"警告：找不到文件 {path}")
-
-    if all_data:
-        res_df = pd.DataFrame(all_data)
-        
-        # 再次对省份做兜底补充
-        res_df["省份"] = res_df.apply(
-            lambda r: r["省份"] if str(r["省份"]).strip() else get_province_by_city(r["城市"]), 
-            axis=1
-        )
-        
-        # 保存回“最终要填写的竞品表.xlsx”
-        res_df.to_excel(target_file, index=False)
-        print(f"\n[成功] 竞品表录入完成！共写入 {len(res_df)} 条记录至 '{target_file}'。")
-    else:
-        print("\n[提示] 未提取到任何有效数据，请检查源Excel数据格式。")
-
-if __name__ == "__main__":
-    main()
+            st.warning("⚠️ 未能从上传的文件中提取到有效数据，请检查 Excel 内容。")
+else:
+    st.info("👆 请在上方选择文件框上传竞品 Excel 报表。")
